@@ -1,94 +1,51 @@
-import time
-import json
-import aiohttp
 import asyncio
-import ast
-import requests
-from aiogram import Bot
+import aiohttp
 import sqlite3 as sl
+from aiogram import Bot
 
-db = sl.connect('test.db')
-
-
+# Configuration (Consider moving these to a separate config file or environment variables)
 BOT_TOKEN = ""
 CONV_WITH_BOT_ID = 6666666666
+COINS_API_URL = "https://api.coingecko.com/api/v3/coins/{}"
 
+# Initialize bot and database connection
 bot = Bot(token=BOT_TOKEN)
+db = sl.connect('test.db')
 
-
-f = open("coins.txt", "r")
-coins = f.read()
-coins = ast.literal_eval(coins)
-
-
-coins = coins[0:101]
-
+async def fetch_coin_data(session, coin_name):
+    async with session.get(COINS_API_URL.format(coin_name)) as response:
+        return await response.json()
 
 async def send_message(message):
     await bot.send_message(CONV_WITH_BOT_ID, message)
 
-
-def priceupdate(dbcoinname, coin, platform, i):
-    base = coin["tickers"][i]["base"]
-    target = coin["tickers"][i]["target"]
-    newprice = coin["tickers"][i]["converted_last"]["usd"]
-    try:
-        oldprice = db.execute(
-            f'SELECT price FROM {dbcoinname} WHERE pair = "{base}/{target}" AND platform = "{platform}"').fetchone()[0]
-        if newprice > oldprice:
-            change = newprice / oldprice
-            if change > 5:
-                asyncio.run(send_message(
-                    f'{platform} {coin["tickers"][i]["base"]}/{coin["tickers"][i]["target"]} {change}% increase'))
+def update_price_in_db(dbcoinname, base, target, platform, newprice):
+    with db:
+        result = db.execute('SELECT price FROM {} WHERE pair = ? AND platform = ?'.format(dbcoinname), 
+                            (f"{base}/{target}", platform)).fetchone()
+        if result:
+            oldprice = result[0]
+            # Calculate price change and decide if a message should be sent
         else:
-            change = (oldprice - newprice) / oldprice
-            if change > 5:
-                asyncio.run(send_message(
-                    f'{platform} {coin["tickers"][i]["base"]}/{coin["tickers"][i]["target"]} {change}% decrease'))
-        update = db.execute(
-            f'UPDATE {dbcoinname} SET price = {newprice} WHERE pair = "{coin["tickers"][i]["base"]}/{coin["tickers"][i]["target"]}" AND platform = "{platform}"')
-    except TypeError as e:
-        print("Adding new pair to database")
-        print(dbcoinname, base, target, platform, newprice)
-        db.execute(
-            f'UPDATE {dbcoinname} SET price = {newprice} WHERE pair = "{coin["tickers"][i]["base"]}/{coin["tickers"][i]["target"]}" AND platform = "{platform}"')
+            # Insert new price if pair does not exist
+            db.execute('INSERT INTO {} (pair, platform, price) VALUES (?, ?, ?)'.format(dbcoinname),
+                       (f"{base}/{target}", platform, newprice))
 
+async def process_coin(coin_name):
+    async with aiohttp.ClientSession() as session:
+        coin_data = await fetch_coin_data(session, coin_name)
+        dbcoinname = coin_name.replace("-", "")
+        # Iterate through tickers and process them
+        for ticker in coin_data.get("tickers", []):
+            if ticker["market"]["name"] in ["Uniswap (v3)", "Uniswap (v2)", "Sushiswap"]: # Add more as needed
+                update_price_in_db(dbcoinname, ticker["base"], ticker["target"], ticker["market"]["name"], ticker["converted_last"]["usd"])
 
-for coinname in coins:
-    dbcoinname = str(coinname).replace("-", "")
-    coin = requests.get(
-        f"https://api.coingecko.com/api/v3/coins/{coinname}?localization=false&tickers=true&market_data=false&community_data=false&developer_data=false&sparkline=false")
+async def main():
+    with open("coins.txt", "r") as f:
+        coins = eval(f.read())[:101]  # Consider JSON for safer parsing
 
-    coin = coin.json()
-    print(coin)
-    tickerslen = len(coin["tickers"])
+    tasks = [process_coin(coin) for coin in coins]
+    await asyncio.gather(*tasks)
 
-    for i in range(tickerslen):
-        if coin["tickers"][i]["market"]["name"] == "Uniswap (v3)" and coin["tickers"][i]["converted_last"]["usd"] > 0 and coin["tickers"][i]["converted_volume"]["usd"] > 10000:
-            priceupdate(dbcoinname, coin, "Uniswap (v3)", i)
-
-        if coin["tickers"][i]["market"]["name"] == "Uniswap (v2)" and coin["tickers"][i]["converted_last"]["usd"] > 0 and coin["tickers"][i]["converted_volume"]["usd"] > 10000:
-            priceupdate(dbcoinname, coin, "Uniswap (v2)", i)
-
-        if coin["tickers"][i]["market"]["name"] == "Sushiswap" and coin["tickers"][i]["converted_last"]["usd"] > 0 and coin["tickers"][i]["converted_volume"]["usd"] > 10000:
-            priceupdate(dbcoinname, coin, "Sushiswap", i)
-        if coin["tickers"][i]["market"]["name"] == "PancakeSwap (v2)" and coin["tickers"][i]["converted_last"]["usd"] > 0 and coin["tickers"][i]["converted_volume"]["usd"] > 10000:
-            priceupdate(dbcoinname, coin, "PancakeSwap (v2)", i)
-
-        if coin["tickers"][i]["market"]["name"] == "Uniswap (Arbitrum One)" and coin["tickers"][i]["converted_last"]["usd"] > 0 and coin["tickers"][i]["converted_volume"]["usd"] > 10000:
-            priceupdate(dbcoinname, coin, "Uniswap (Arbitrum One)", i)
-
-        if coin["tickers"][i]["market"]["name"] == "Optimism" and coin["tickers"][i]["converted_last"]["usd"] > 0 and coin["tickers"][i]["converted_volume"]["usd"] > 10000:
-            priceupdate(dbcoinname, coin, "Optimism", i)
-        if coin["tickers"][i]["market"]["name"] == "Uniswap (Polygon)" and coin["tickers"][i]["converted_last"]["usd"] > 0 and coin["tickers"][i]["converted_volume"]["usd"] > 10000:
-            priceupdate(dbcoinname, coin, "Uniswap (Polygon)", i)
-        if coin["tickers"][i]["market"]["name"] == "Binance" and coin["tickers"][i]["converted_last"]["usd"] > 0 and coin["tickers"][i]["converted_volume"]["usd"] > 10000:
-            priceupdate(dbcoinname, coin, "Binance", i)
-        if coin["tickers"][i]["market"]["name"] == "Huobi Global" and coin["tickers"][i]["converted_last"]["usd"] > 0 and coin["tickers"][i]["converted_volume"]["usd"] > 10000:
-            priceupdate(dbcoinname, coin, "Huobi Global", i)
-        if coin["tickers"][i]["market"]["name"] == "KuCoin" and coin["tickers"][i]["converted_last"]["usd"] > 0 and coin["tickers"][i]["converted_volume"]["usd"] > 10000:
-            priceupdate(dbcoinname, coin, "KuCoin", i)
-        if coin["tickers"][i]["market"]["name"] == "FTX" and coin["tickers"][i]["converted_last"]["usd"] > 0 and coin["tickers"][i]["converted_volume"]["usd"] > 10000:
-            priceupdate(dbcoinname, coin, "FTX", i)
-    time.sleep(6)
-f.close()
+if __name__ == "__main__":
+    asyncio.run(main())
